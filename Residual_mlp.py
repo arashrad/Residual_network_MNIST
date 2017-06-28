@@ -1,161 +1,153 @@
+# A 30-layers MLP with skip connections between non consecutive layers.
+
+from __future__ import absolute_import
+from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
 import numpy as np
+from sklearn.utils import shuffle
 
 
-# Reading the MNIST data-set
-from tensorflow.examples.tutorials.mnist import input_data
-mnist = input_data.read_data_sets("/tmp/data/", one_hot=True)
-
-# Network's hyper-parameters
 learning_rate = 0.001
 number_epochs = 20
 batch_size = 100
-n_input = 784
-n_categories = 10
-n_hidden_b1 = 256 # number of hidden units for each layer in residual block one.
-n_hidden_b2 = 128 # number of hidden units for each layer in residual block two.
-n_hidden_b3 = 64 # number of hidden units for each layer in residual block three.
-
-# Model's input and output
-x = tf.placeholder(tf.float32, [None, 784])
-y = tf.placeholder(tf.float32, [None, 10])
 
 
-# defining the building blocks for our residual model
-def residual_block(inputs, weights, biases):
-    """this function makes a building block for residual network.
-    Each block consists of 3 hidden layers with a skip connection between hidden layer 1 and 3.
-    Let x be the input of the block and g the activation function (here sigmoid) then the output would be:
-    out = h(3)= g(h(2)*W(2) + b(2) + h(1)W(s))...
-    """
+def main():
+    """This is the main training function"""
 
-    # first layer of the block with sigmoid activation function: sigmoid(x.W(1) + b(1))
-    hidden_layer_1 = tf.nn.sigmoid(tf.add(tf.matmul(inputs, weights['layer1']), biases['layer1']))
+    # we start by loading MNIST data-set
+    # reading the saved data-set from HDD
+    f = open("augmented_dataset", "rb")
+    x_train = np.load(f)
+    y_train = np.load(f)
+    x_valid = np.load(f)
+    y_valid = np.load(f)
+    x_test = np.load(f)
+    y_test = np.load(f)
+    f.close()
+    print("data is loaded...")
 
-    # second layer of the block with sigmoid activation function: sigmoid(hidden_layer_1.W(2) + b(2))
-    hidden_layer_2 = tf.nn.sigmoid(tf.add(tf.matmul(hidden_layer_1, weights['layer2']), biases['layer2']))
+    sess = tf.InteractiveSession()
 
-    # third layer of the block: sigmoid(hidden_layer_2.W(3) + b(3) + hidden_layer_1.W(s))
-    hidden_layer_3 = tf.add(tf.matmul(hidden_layer_2, weights['layer3']), biases['layer3'])
-    skip_values = tf.matmul(hidden_layer_1, weights['skip'])
-    output = tf.nn.sigmoid(tf.add(hidden_layer_3, skip_values))
-    return output
+    # defining input and output placeholders
+    with tf.name_scope('inputs'):
+        x = tf.placeholder(tf.float32, shape=[None, 784], name='x')
+        y = tf.placeholder(tf.float32, shape=[None, 10], name='labels')
+
+    # initializing weight variables
+    def weights_var(shape, act=tf.nn.sigmoid):
+        """initializing weights for sigmoid activation function based on Xavier initialization"""
+        fan_in = shape[0]
+        fan_out = shape[1]
+        if act == tf.nn.sigmoid:  # in the case of sigmoid as activation function
+            low = -4 * np.sqrt(6.0 / (fan_in + fan_out))
+            high = 4 * np.sqrt(6.0 / (fan_in + fan_out))
+            return tf.Variable(tf.random_uniform(shape, minval=low, maxval=high, dtype=tf.float32))
+        else:  # in the case of Relu or any other activation functions
+            low = -np.sqrt(2.0 / (fan_in + fan_out))
+            high = np.sqrt(2.0 / (fan_in + fan_out))
+            return tf.Variable(tf.random_uniform(shape, minval=low, maxval=high, dtype=tf.float32))
+
+    def biases_var(shape):
+        initial = tf.constant(0.1, shape=shape)
+        return tf.Variable(initial)
+
+    def neural_network_layer(layer_input, num_in, num_out, act=tf.nn.sigmoid):
+        """this is building block of each hidden layer in MLP network"""
+        layer_weights = weights_var([num_in, num_out])
+        layer_biases = biases_var([num_out])
+        pre_activation = tf.matmul(layer_input, layer_weights) + layer_biases
+        activations = act(pre_activation, name='activation')
+        return activations
+
+    def residual_blocks(layer_input, num_in,  block_shape):
+        if num_in == block_shape[1]:
+            layer_1 = neural_network_layer(layer_input, num_in=num_in, num_out=block_shape[0])
+            layer_2 = neural_network_layer(layer_1, num_in=block_shape[0], num_out=block_shape[1], act=tf.identity)
+            # skip_value = tf.matmul(layer_input, weights_var([num_in, block_shape[1]]))
+            output = tf.nn.sigmoid(tf.add(layer_2, layer_input))
+            return output
+        else:
+            layer_1 = neural_network_layer(layer_input, num_in=num_in, num_out=block_shape[0])
+            layer_2 = neural_network_layer(layer_1, num_in=block_shape[0], num_out=block_shape[1], act=tf.identity)
+            skip_value = tf.matmul(layer_input, weights_var([num_in, block_shape[1]]))
+            # output = tf.nn.sigmoid(tf.add(layer_1, layer_3))
+            output = tf.nn.sigmoid(tf.add(layer_2, skip_value))
+            return output
+
+    # Now we define last layer(output layer) but without Softmax,
+    # so we pass an identity argument to the neural_network_layer constructor
+    # as the activation function
+    first_layer = neural_network_layer(x, 784, 256)
+    model = residual_blocks(first_layer, 256, [128, 128])
+    model = residual_blocks(model, 128, [64, 64])
+    for j in range(12):
+        model = residual_blocks(model, 64, [64, 64])
+    y_hat = neural_network_layer(model, 64, 10, act=tf.identity)
+
+    # we define cross entropy loss function
+    with tf.name_scope('cross_entropy'):
+        delta = tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=y_hat)
+        with tf.name_scope('total'):
+            cross_entropy = tf.reduce_mean(delta)
+    tf.summary.scalar('cross_entropy', cross_entropy)
+
+    # training
+    with tf.name_scope('train'):
+        train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cross_entropy)
+
+    with tf.name_scope('accuracy'):
+        with tf.name_scope('correct_prediction'):
+            correct_prediction = tf.equal(tf.argmax(y_hat, 1), tf.argmax(y, 1))
+        with tf.name_scope('accuracy'):
+            accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+    tf.summary.scalar('accuracy', accuracy)
+
+    tf.global_variables_initializer().run()
+
+    loss_records = []
+    validation_records = []
+    training_records = []
+    test_record = []
+    for t in range(number_epochs):
+        # shuffling data for each epoch
+        x_train, y_train = shuffle(x_train, y_train)
+
+        print("Start training at epoch: ", t+1)
+        for i in range(x_train.shape[0] // batch_size):
+            # Train the network and record training summery
+            x_train_batch = x_train[i*batch_size:i*batch_size + batch_size]
+            y_train_batch = y_train[i*batch_size:i * batch_size + batch_size]
+            _ = sess.run(train_step, feed_dict={x: x_train_batch, y: y_train_batch})
+            # train_writer.add_summary(summary, i)
+            if i % 100 == 0:
+                acc = sess.run(accuracy, feed_dict={x: x_valid, y: y_valid})
+                print('Accuracy at step %s: %s' % (i, acc))
+                validation_records.append(acc)
+                loss, acc = sess.run([cross_entropy, accuracy], feed_dict={x: x_train, y: y_train})
+                training_records.append(acc)
+                loss_records.append(loss)
+
+    acc = sess.run([accuracy], feed_dict={x: x_test, y: y_test})
+    print('Training is finshed and test set Accuracy is: %s' %(acc))
+    test_record.append(acc)
+
+    # saving records
+    f = open("saved_records_resnet_identity_30_v2", "wb")
+    np.save(f, np.array(loss_records))
+    np.save(f, np.array(training_records))
+    np.save(f, np.array(validation_records))
+    np.save(f, np.array(test_record))
+    f.close()
+    print("data is saved...")
+
+main()
 
 
-# defining and initiating the weights for blocks. We use Xavier method for weight initiation
-
-low1 = -4*np.sqrt(6.0/(n_input + n_hidden_b1)) # use 4 for sigmoid, 1 for tanh activation
-high1 = 4*np.sqrt(6.0/(n_input + n_hidden_b1))
-low2 = -4*np.sqrt(6.0/(n_hidden_b1 + n_hidden_b1))
-high2 = 4*np.sqrt(6.0/(n_hidden_b1 + n_hidden_b1))
 
 
-weights_block1 = {
-    'layer1': tf.Variable(tf.random_uniform([n_input, n_hidden_b1], minval=low1, maxval=high1, dtype=tf.float32)),
-    'layer2': tf.Variable(tf.random_uniform([n_hidden_b1, n_hidden_b1], minval=low2, maxval=high2, dtype=tf.float32)),
-    'layer3': tf.Variable(tf.random_uniform([n_hidden_b1, n_hidden_b1], minval=low2, maxval=high2, dtype=tf.float32)),
-    # 'skip': tf.random_normal([n_hidden_b1, n_hidden_b1])
-    'skip': tf.Variable(tf.random_normal([n_hidden_b1, n_hidden_b1]))
-}
 
-biases_block1 = {
-    'layer1': tf.Variable(tf.random_normal([n_hidden_b1])),
-    'layer2': tf.Variable(tf.random_normal([n_hidden_b1])),
-    'layer3': tf.Variable(tf.random_normal([n_hidden_b1]))
-}
-
-low3 = -4*np.sqrt(6.0/(n_hidden_b1 + n_hidden_b2)) # use 4 for sigmoid, 1 for tanh activation
-high3 = 4*np.sqrt(6.0/(n_hidden_b1 + n_hidden_b2))
-low4 = -4*np.sqrt(6.0/(n_hidden_b2 + n_hidden_b2))
-high4 = 4*np.sqrt(6.0/(n_hidden_b2 + n_hidden_b2))
-
-weights_block2 = {
-    'layer1': tf.Variable(tf.random_uniform([n_hidden_b1, n_hidden_b2], minval=low3, maxval=high3, dtype=tf.float32)),
-    'layer2': tf.Variable(tf.random_uniform([n_hidden_b2, n_hidden_b2], minval=low4, maxval=high4, dtype=tf.float32)),
-    'layer3': tf.Variable(tf.random_uniform([n_hidden_b2, n_hidden_b2], minval=low4, maxval=high4, dtype=tf.float32)),
-    # 'skip': tf.random_normal([n_hidden_b2, n_hidden_b2])
-    'skip': tf.Variable(tf.random_normal([n_hidden_b2, n_hidden_b2]))
-}
-
-biases_block2 = {
-    'layer1': tf.Variable(tf.random_normal([n_hidden_b2])),
-    'layer2': tf.Variable(tf.random_normal([n_hidden_b2])),
-    'layer3': tf.Variable(tf.random_normal([n_hidden_b2]))
-}
-
-low5 = -4*np.sqrt(6.0/(n_hidden_b2 + n_hidden_b3)) # use 4 for sigmoid, 1 for tanh activation
-high5 = 4*np.sqrt(6.0/(n_hidden_b2 + n_hidden_b3))
-low6 = -4*np.sqrt(6.0/(n_hidden_b3 + n_hidden_b3))
-high6 = 4*np.sqrt(6.0/(n_hidden_b3 + n_hidden_b3))
-
-weights_block3 = {
-    'layer1': tf.Variable(tf.random_uniform([n_hidden_b2, n_hidden_b3], minval=low5, maxval=high5, dtype=tf.float32)),
-    'layer2': tf.Variable(tf.random_uniform([n_hidden_b3, n_hidden_b3], minval=low6, maxval=high6, dtype=tf.float32)),
-    'layer3': tf.Variable(tf.random_uniform([n_hidden_b3, n_hidden_b3], minval=low6, maxval=high6, dtype=tf.float32)),
-    # 'skip': tf.random_normal([n_hidden_b2, n_hidden_b2])
-    'skip': tf.Variable(tf.random_normal([n_hidden_b3, n_hidden_b3]))
-}
-
-biases_block3 = {
-    'layer1': tf.Variable(tf.random_normal([n_hidden_b3])),
-    'layer2': tf.Variable(tf.random_normal([n_hidden_b3])),
-    'layer3': tf.Variable(tf.random_normal([n_hidden_b3]))
-}
-
-
-# constructing the model
-low = -4*np.sqrt(6.0/(n_hidden_b3 + n_categories)) # use 4 for sigmoid, 1 for tanh activation
-high = 4*np.sqrt(6.0/(n_hidden_b3 + n_categories))
-last_layer_weights = tf.Variable(tf.random_uniform([n_hidden_b3, n_categories], minval=low, maxval=high, dtype=tf.float32))
-last_layer_biases = tf.Variable(tf.random_normal([n_categories]))
-
-model = residual_block(x, weights_block1, biases_block1)
-model = residual_block(model, weights_block2, biases_block2)
-model = residual_block(model, weights_block3, biases_block3)
-model = tf.add(tf.matmul(model, last_layer_weights), last_layer_biases)
-
-# defining the cost and optimizer
-cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=model, labels=y))
-optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
-
-# defining session
-sess = tf.InteractiveSession()
-init = tf.global_variables_initializer()
-
-# initializing parameters
-sess.run(init)
-
- # Training cycle
-for epoch in range(number_epochs):
-    avg_cost = 0.
-    total_batch = int(mnist.train.num_examples/batch_size)
-    # Loop over all batches
-    for i in range(total_batch):
-        batch_x, batch_y = mnist.train.next_batch(batch_size)
-        # Run optimization op (backprop) and cost op (to get loss value)
-        _, c = sess.run([optimizer, cost], feed_dict={x: batch_x, y: batch_y})
-        # Compute average loss
-        avg_cost += c / total_batch
-    # Display logs per epoch step
-
-    print("Epoch:", '%04d' % (epoch+1), "cost=", "{:.9f}".format(avg_cost))
-
-    train_prediction = tf.equal(tf.argmax(model, 1), tf.argmax(y, 1))
-    train_accuracy = tf.reduce_mean(tf.cast(train_prediction, "float"))
-    print("train_Accuracy:", train_accuracy.eval({x: mnist.train.images, y: mnist.train.labels}))
-
-    valid_prediction = tf.equal(tf.argmax(model, 1), tf.argmax(y, 1))
-    valid_accuracy = tf.reduce_mean(tf.cast(valid_prediction, "float"))
-    print("valid_Accuracy:", valid_accuracy.eval({x: mnist.validation.images, y: mnist.validation.labels}))
-
-print("Optimization Finished!")
-
-# Test model
-correct_prediction = tf.equal(tf.argmax(model, 1), tf.argmax(y, 1))
-# Calculate accuracy
-accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
-print("Accuracy:", accuracy.eval({x: mnist.test.images, y: mnist.test.labels}))
 
 
